@@ -3,6 +3,7 @@ import os
 import time
 import re
 import base64
+import tempfile
 from datetime import datetime
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -12,93 +13,150 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 import pdfplumber
+from streamlit_google_auth import Authenticate
 
-# --- 세션 설정 및 드라이버 초기화 ---
-def get_driver():
-    options = Options()
-    options.add_argument("--headless") # 서버용 화면 없음 모드
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    
-    # PDF 인쇄를 위한 전용 설정
-    settings = {
-        "recentDestinations": [{"id": "Save as PDF", "origin": "local"}],
-        "selectedDestinationId": "Save as PDF",
-        "version": 2
-    }
-    options.add_experimental_option("prefs", {
-        "printing.print_preview_sticky_settings.appState": str(settings),
-        "savefile.default_directory": "/tmp"
-    })
-    
-    driver = webdriver.Chrome(service=Service(ChromeDriverManager().install()), options=options)
-    return driver
+# --- 1. 구글 OAuth 설정 ---
+# Streamlit Cloud의 Settings -> Secrets에 아래 정보가 저장되어 있어야 합니다.
+auth = Authenticate(
+    secret_to_add_database = st.secrets["google_auth"]["database_key"],
+    cookie_name = "boosters_tax_auth",
+    key = st.secrets["google_auth"]["cookie_key"],
+    client_id = st.secrets["google_auth"]["client_id"],
+    client_secret = st.secrets["google_auth"]["client_secret"],
+    redirect_uri = st.secrets["google_auth"]["redirect_uri"],
+)
 
-# --- PDF에서 정보 추출 (사용자님의 기존 로직 유지) ---
-def extract_info_from_pdf_data(pdf_content):
+# --- 2. PDF 정보 추출 함수 (기존 로직 이식) ---
+def extract_info_from_pdf(pdf_path):
     try:
-        with pdfplumber.open(pdf_content) as pdf:
+        with pdfplumber.open(pdf_path) as pdf:
             text = pdf.pages[0].extract_text()
+            lines = text.split('\n')
             
-            # 회사명 및 날짜 추출 로직 (기존 정규식 활용)
+            회사명 = ""
+            for i, line in enumerate(lines):
+                if '상호' in line or '법인명' in line:
+                    parts = line.split()
+                    for j, part in enumerate(parts):
+                        if '상호' in part or '법인명' in part:
+                            if j + 1 < len(parts):
+                                회사명_parts = parts[j+1:]
+                                for k, word in enumerate(회사명_parts):
+                                    if '성명' in word:
+                                        회사명_parts = 회사명_parts[:k]
+                                        break
+                                회사명 = ' '.join(회사명_parts)
+                                break
+                    break
+            
+            정산일자 = ""
             date_pattern = r'(\d{4})[년\s]*(\d{1,2})[월\s]*(\d{1,2})[일\s]*'
             matches = re.findall(date_pattern, text)
-            date_str = f"{matches[0][0]}{matches[0][1].zfill(2)}{matches[0][2].zfill(2)}" if matches else datetime.today().strftime("%Y%m%d")
+            if matches:
+                year, month, day = matches[0]
+                정산일자 = f"{year}{month.zfill(2)}{day.zfill(2)}"
             
-            # (임시) 회사명 추출 로직 - 기존 코드를 여기에 통합하세요.
-            company_name = "추출된업체명" 
-            return company_name, date_str
-    except:
-        return "Unknown", datetime.today().strftime("%Y%m%d")
+            return 회사명.strip(), 정산일자
+    except Exception:
+        return "", ""
 
-# --- Streamlit UI 구성 ---
-st.title("📑 세금계산서 PDF 변환 자동화")
-st.markdown("HTML 파일을 업로드하면 **비밀번호 입력부터 PDF 저장**까지 자동으로 처리합니다.")
-
-uploaded_files = st.file_uploader("HTML 파일들을 선택하세요", type="html", accept_multiple_files=True)
-biz_num = st.text_input("사업자번호", value="1828801269")
-
-if st.button("변환 시작") and uploaded_files:
-    driver = get_driver()
+# --- 3. Selenium 드라이버 설정 (Headless) ---
+def get_driver():
+    options = Options()
+    options.add_argument("--headless")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
     
-    for uploaded_file in uploaded_files:
-        with st.status(f"처리 중: {uploaded_file.name}...", expanded=True) as status:
-            # 1. HTML 파일 임시 저장
-            temp_html = f"/tmp/{uploaded_file.name}"
-            with open(temp_html, "wb") as f:
-                f.write(uploaded_file.getvalue())
+    service = Service(ChromeDriverManager().install())
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
+
+# --- 4. 메인 인증 로직 ---
+auth.check_authentification()
+auth.login()
+
+if st.session_state.get('connected'):
+    user_email = st.session_state['user_info'].get('email', '')
+    
+    # 도메인 제한 체크 (@boosters.kr)
+    if not user_email.endswith("@boosters.kr"):
+        st.error(f"접근 권한이 없습니다: {user_email}")
+        st.warning("@boosters.kr 계정으로 다시 로그인해주세요.")
+        if st.button("로그아웃"):
+            auth.logout()
+        st.stop()
+
+    # --- 서비스 본문 시작 ---
+    st.sidebar.success(f"접속됨: {user_email}")
+    if st.sidebar.button("로그아웃"):
+        auth.logout()
+
+    st.title("📄 세금계산서 PDF 변환기 (Boosters 전용)")
+    st.info("HTML 파일을 업로드하면 비밀번호를 자동으로 입력하고 회사명을 추출하여 PDF로 변환합니다.")
+
+    uploaded_files = st.file_uploader("HTML 파일 선택", type="html", accept_multiple_files=True)
+    사업자번호 = st.text_input("비밀번호 (사업자번호)", value="1828801269")
+
+    if st.button("변환 프로세스 시작") and uploaded_files:
+        driver = get_driver()
+        progress_bar = st.progress(0)
+        
+        for idx, uploaded_file in enumerate(uploaded_files):
+            try:
+                # 1. 임시 파일 저장
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_html:
+                    tmp_html.write(uploaded_file.getvalue())
+                    tmp_path = tmp_html.name
+
+                # 2. 브라우저 조작
+                driver.get(f"file://{tmp_path}")
+                wait = WebDriverWait(driver, 10)
+                
+                # 비번 입력 및 확인
+                pw_input = wait.until(EC.presence_of_element_located((By.XPATH, '//input[@type="password"]')))
+                pw_input.send_keys(사업자번호)
+                driver.find_element(By.XPATH, '//button[contains(text(), "확인")]').click()
+                time.sleep(4) # 렌더링 대기
+
+                # 3. PDF 저장 (CDP 명령어 사용)
+                pdf_params = {'printBackground': True, 'pageSize': 'A4'}
+                pdf_data = driver.execute_cdp_cmd("Page.printToPDF", pdf_params)
+                pdf_bytes = base64.b64decode(pdf_data['data'])
+
+                # 4. 정보 추출을 위해 임시 PDF 저장
+                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
+                    tmp_pdf.write(pdf_bytes)
+                    tmp_pdf_path = tmp_pdf.name
+                
+                회사명, 정산일자 = extract_info_from_pdf(tmp_pdf_path)
+                
+                # 파일명 생성
+                today = datetime.today().strftime("%Y%m%d")
+                safe_회사명 = re.sub(r'[\\/*?:"<>|]', "_", 회사명) if 회사명 else "알수없음"
+                final_filename = f"세금계산서_{safe_회사명}_{정산일자 or today}.pdf"
+
+                # 5. 결과물 제공
+                st.success(f"✅ 변환 완료: {final_filename}")
+                st.download_button(
+                    label=f"📥 {final_filename} 다운로드",
+                    data=pdf_bytes,
+                    file_name=final_filename,
+                    mime="application/pdf",
+                    key=f"btn_{idx}"
+                )
+                
+                # 임시 파일 삭제
+                os.unlink(tmp_path)
+                os.unlink(tmp_pdf_path)
+
+            except Exception as e:
+                st.error(f"❌ {uploaded_file.name} 처리 중 오류: {str(e)}")
             
-            # 2. Selenium 제어
-            driver.get(f"file://{temp_html}")
-            wait = WebDriverWait(driver, 10)
-            
-            # 암호 입력 및 확인
-            pw_input = wait.until(EC.presence_of_element_located((By.XPATH, '//input[@type="password"]')))
-            pw_input.send_keys(biz_num)
-            driver.find_element(By.XPATH, '//button[contains(text(), "확인")]').click()
-            time.sleep(3) # 페이지 로딩 대기
-            
-            # 3. PDF 변환 (Chrome DevTools Protocol 사용)
-            # Headless 모드에서는 window.print() 대신 이 명령어를 사용해야 합니다.
-            print_options = {
-                'landscape': False,
-                'displayHeaderFooter': False,
-                'printBackground': True,
-                'preferCSSPageSize': True,
-            }
-            pdf_data = driver.execute_cdp_cmd("Page.printToPDF", print_options)
-            pdf_bytes = base64.b64decode(pdf_data['data'])
-            
-            # 4. 파일명 최적화 및 다운로드 버튼 생성
-            # (추출 로직을 통해 파일명 생성 후)
-            final_name = f"세금계산서_{uploaded_file.name.split('.')[0]}.pdf"
-            
-            st.download_button(
-                label=f"📥 {final_name} 다운로드",
-                data=pdf_bytes,
-                file_name=final_name,
-                mime="application/pdf"
-            )
-            status.update(label=f"✅ {uploaded_file.name} 완료!", state="complete")
-            
-    driver.quit()
+            progress_bar.progress((idx + 1) / len(uploaded_files))
+        
+        driver.quit()
+        st.balloons()
+
+else:
+    st.info("서비스를 이용하려면 @boosters.kr 계정으로 로그인하세요.")
