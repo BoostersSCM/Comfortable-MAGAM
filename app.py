@@ -15,15 +15,13 @@ from selenium.webdriver.support import expected_conditions as EC
 import pdfplumber
 from streamlit_google_auth import Authenticate
 
-# --- 1. 구글 OAuth 설정 ---
-# Streamlit Cloud의 Settings -> Secrets에 아래 정보가 저장되어 있어야 합니다.
+# --- 1. 구글 OAuth 설정 (사용자의 Secrets 키 이름에 맞춤) ---
 auth = Authenticate(
-    secret_to_add_database = st.secrets["google_auth"]["database_key"],
-    cookie_name = "boosters_tax_auth",
-    key = st.secrets["google_auth"]["cookie_key"],
     client_id = st.secrets["google_auth"]["client_id"],
     client_secret = st.secrets["google_auth"]["client_secret"],
     redirect_uri = st.secrets["google_auth"]["redirect_uri"],
+    cookie_name = "boosters_tax_auth",
+    key = st.secrets["google_auth"]["cookie_key"], # secrets의 cookie_key와 매칭
 )
 
 # --- 2. PDF 정보 추출 함수 (기존 로직 이식) ---
