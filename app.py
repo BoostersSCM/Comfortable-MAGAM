@@ -3,6 +3,7 @@ import os
 import time
 import re
 import base64
+import json
 import tempfile
 from datetime import datetime
 from selenium import webdriver
@@ -15,13 +16,33 @@ from selenium.webdriver.support import expected_conditions as EC
 import pdfplumber
 from streamlit_google_auth import Authenticate
 
-# --- 1. 구글 OAuth 설정 (사용자의 Secrets 키 이름에 맞춤) ---
+
+
+# --- 1. 구글 OAuth 설정 (임시 JSON 파일 생성 방식) ---
+# 라이브러리가 요구하는 표준 JSON 구조를 만듭니다.
+google_creds = {
+    "web": {
+        "client_id": st.secrets["google_auth"]["client_id"],
+        "client_secret": st.secrets["google_auth"]["client_secret"],
+        "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+        "token_uri": "https://oauth2.googleapis.com/token",
+        "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
+        "redirect_uris": [st.secrets["google_auth"]["redirect_uri"]]
+    }
+}
+
+# 임시 폴더에 json 파일을 저장하고 그 경로를 가져옵니다.
+with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as temp_cred_file:
+    json.dump(google_creds, temp_cred_file)
+    temp_cred_path = temp_cred_file.name
+
+# 수정된 Authenticate 호출 (인자 이름을 라이브러리 규격에 맞춤)
 auth = Authenticate(
-    client_id = st.secrets["google_auth"]["client_id"],
-    client_secret = st.secrets["google_auth"]["client_secret"],
-    redirect_uri = st.secrets["google_auth"]["redirect_uri"],
+    secret_credentials_path = temp_cred_path,  # 파일 경로를 전달
     cookie_name = "boosters_tax_auth",
-    key = st.secrets["google_auth"]["cookie_key"], # secrets의 cookie_key와 매칭
+    key = st.secrets["google_auth"]["cookie_key"],
+    cookie_expiry_days = 1,
+    redirect_uri = st.secrets["google_auth"]["redirect_uri"]
 )
 
 # --- 2. PDF 정보 추출 함수 (기존 로직 이식) ---
