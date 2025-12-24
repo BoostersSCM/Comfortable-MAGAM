@@ -2,3 +2,4 @@ streamlit
 selenium
 webdriver-manager
 pdfplumber
+streamlit-google-auth
