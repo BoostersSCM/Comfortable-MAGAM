@@ -2,4 +2,4 @@ streamlit
 selenium
 webdriver-manager
 pdfplumber
-streamlit-google-auth
+streamlit-google-auth>=1.2.0
