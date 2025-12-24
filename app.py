@@ -4,9 +4,10 @@ import os
 import re
 import base64
 import time
-from datetime import datetime
 
 import pdfplumber
+
+from authlib.integrations.requests_client import OAuth2Session
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -18,25 +19,49 @@ from selenium.webdriver.support import expected_conditions as EC
 
 
 # =====================================================
-# 1. Google OAuth (Streamlit 공식)
+# 1. Google OAuth (Streamlit Cloud 안정판)
 # =====================================================
 def require_login():
-    user = st.login(
-        provider="google",
-        client_id=st.secrets["google_auth"]["client_id"],
-        secret=st.secrets["google_auth"]["client_secret"],
-        scopes=["profile", "email"],
+    if "user_email" in st.session_state:
+        return st.session_state["user_email"]
+
+    oauth = OAuth2Session(
+        client_id=st.secrets["google"]["client_id"],
+        client_secret=st.secrets["google"]["client_secret"],
+        scope="openid email profile",
+        redirect_uri=st.secrets["google"]["redirect_uri"],
     )
 
-    if user is None:
-        st.info("🔐 @boosters.kr 구글 계정으로 로그인해 주세요.")
+    query_params = st.query_params
+
+    if "code" not in query_params:
+        auth_url, _ = oauth.create_authorization_url(
+            "https://accounts.google.com/o/oauth2/auth",
+            access_type="offline",
+            prompt="consent",
+        )
+        st.title("🔐 로그인 필요")
+        st.link_button("Google 계정으로 로그인", auth_url)
         st.stop()
 
-    email = user.email.lower()
+    token = oauth.fetch_token(
+        "https://oauth2.googleapis.com/token",
+        authorization_response=st.secrets["google"]["redirect_uri"] + "?code=" + query_params["code"],
+    )
+
+    userinfo = oauth.get(
+        "https://openidconnect.googleapis.com/v1/userinfo",
+        token=token,
+    ).json()
+
+    email = userinfo.get("email", "").lower()
+
     if not email.endswith("@boosters.kr"):
         st.error(f"🚫 접근 권한이 없습니다: {email}")
         st.stop()
 
+    st.session_state["user_email"] = email
+    st.query_params.clear()  # code 제거
     return email
 
 
@@ -72,7 +97,7 @@ def extract_info_from_pdf(pdf_path):
 
 
 # =====================================================
-# 3. Selenium Driver (Streamlit Cloud Headless)
+# 3. Selenium Driver (Cloud Headless)
 # =====================================================
 def get_driver():
     options = Options()
@@ -92,25 +117,19 @@ def get_driver():
 st.set_page_config(
     page_title="Boosters Tax Converter",
     page_icon="📄",
-    layout="centered",
 )
 
-# --- 로그인 ---
 user_email = require_login()
 
-st.sidebar.success(f"✅ 접속 계정\n{user_email}")
+st.sidebar.success(f"✅ 로그인됨\n{user_email}")
+
+if st.sidebar.button("로그아웃"):
+    st.session_state.clear()
+    st.experimental_rerun()
 
 st.title("📄 세금계산서 PDF 변환기 (Boosters)")
-st.write(
-    """
-HTML 세금계산서를 업로드하면  
-자동으로 PDF 변환 및 파일명 정리를 수행합니다.
-"""
-)
+st.write("HTML 세금계산서를 PDF로 변환합니다.")
 
-# =====================================================
-# 5. UI
-# =====================================================
 uploaded_files = st.file_uploader(
     "HTML 파일 선택 (다중 선택 가능)",
     type="html",
@@ -123,7 +142,7 @@ biz_num = st.text_input(
 )
 
 # =====================================================
-# 6. Main Logic
+# 5. Main Logic
 # =====================================================
 if st.button("🚀 변환 시작") and uploaded_files:
     driver = get_driver()
@@ -131,12 +150,10 @@ if st.button("🚀 변환 시작") and uploaded_files:
     for idx, uploaded_file in enumerate(uploaded_files):
         with st.status(f"처리 중: {uploaded_file.name}", expanded=False) as status:
             try:
-                # 1) HTML 임시 저장
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_html:
                     tmp_html.write(uploaded_file.getvalue())
                     html_path = tmp_html.name
 
-                # 2) HTML 로드
                 driver.get(f"file://{html_path}")
                 wait = WebDriverWait(driver, 10)
 
@@ -151,26 +168,22 @@ if st.button("🚀 변환 시작") and uploaded_files:
 
                 time.sleep(5)
 
-                # 3) PDF 생성
                 pdf_data = driver.execute_cdp_cmd(
                     "Page.printToPDF",
-                    {"printBackground": True, "paperWidth": 8.27, "paperHeight": 11.69},
+                    {"printBackground": True}
                 )
 
                 pdf_bytes = base64.b64decode(pdf_data["data"])
 
-                # 4) PDF 임시 저장
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                     tmp_pdf.write(pdf_bytes)
                     pdf_path = tmp_pdf.name
 
-                # 5) 파일명 생성
                 회사명, 정산일자 = extract_info_from_pdf(pdf_path)
                 safe_회사명 = re.sub(r'[\\/*?:"<>|]', "_", 회사명) if 회사명 else "Unknown"
 
                 final_name = f"세금계산서_{safe_회사명}_{정산일자 or 'date'}.pdf"
 
-                # 6) 다운로드
                 st.download_button(
                     label=f"📥 {final_name}",
                     data=pdf_bytes,
@@ -179,13 +192,13 @@ if st.button("🚀 변환 시작") and uploaded_files:
                     key=f"download_{idx}",
                 )
 
-                status.update(label=f"✅ 완료: {uploaded_file.name}", state="complete")
+                status.update(label="✅ 완료", state="complete")
 
                 os.unlink(html_path)
                 os.unlink(pdf_path)
 
             except Exception as e:
-                status.update(label=f"❌ 실패: {uploaded_file.name}", state="error")
+                status.update(label="❌ 실패", state="error")
                 st.error(str(e))
 
     driver.quit()
