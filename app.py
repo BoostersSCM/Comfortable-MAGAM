@@ -23,8 +23,8 @@ from selenium.webdriver.support import expected_conditions as EC
 def require_login():
     user = st.login(
         provider="google",
-        client_id=st.secrets["google"]["client_id"],
-        secret=st.secrets["google"]["client_secret"],
+        client_id=st.secrets["google_auth"]["client_id"],
+        secret=st.secrets["google_auth"]["client_secret"],
         scopes=["profile", "email"],
     )
 
@@ -33,7 +33,6 @@ def require_login():
         st.stop()
 
     email = user.email.lower()
-
     if not email.endswith("@boosters.kr"):
         st.error(f"🚫 접근 권한이 없습니다: {email}")
         st.stop()
