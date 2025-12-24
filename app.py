@@ -19,7 +19,7 @@ from streamlit_google_auth import Authenticate
 
 
 # --- 1. 구글 OAuth 설정 (임시 JSON 파일 생성 방식) ---
-# 라이브러리가 요구하는 표준 JSON 구조를 만듭니다.
+# 라이브러리가 요구하는 표준 JSON 구조 생성
 google_creds = {
     "web": {
         "client_id": st.secrets["google_auth"]["client_id"],
@@ -31,17 +31,16 @@ google_creds = {
     }
 }
 
-# 임시 폴더에 json 파일을 저장하고 그 경로를 가져옵니다.
+# 임시 파일 생성 및 경로 확보
 with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.json') as temp_cred_file:
     json.dump(google_creds, temp_cred_file)
     temp_cred_path = temp_cred_file.name
 
-# 수정된 Authenticate 호출 (인자 이름을 라이브러리 규격에 맞춤)
+# 수정된 Authenticate 호출 (key -> cookie_key)
 auth = Authenticate(
-    secret_credentials_path = temp_cred_path,  # 파일 경로를 전달
+    secret_credentials_path = temp_cred_path,
     cookie_name = "boosters_tax_auth",
-    key = st.secrets["google_auth"]["cookie_key"],
-    cookie_expiry_days = 1,
+    cookie_key = st.secrets["google_auth"]["cookie_key"],  # 여기서 'key'를 'cookie_key'로 변경
     redirect_uri = st.secrets["google_auth"]["redirect_uri"]
 )
 
