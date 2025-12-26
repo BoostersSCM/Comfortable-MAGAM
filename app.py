@@ -76,52 +76,79 @@ def require_login():
         st.stop()
 
 # =====================================================
-# 2. HTML 정보 추출 (날짜 로직 수정: 아래 칸 + YYYY/MM/DD)
+# 2. [강력 수정] 정보 추출 로직 (표 구조 + 텍스트 패턴 이중 검색)
 # =====================================================
 def extract_info_from_html_content(html_content):
     try:
         soup = BeautifulSoup(html_content, 'html.parser')
         
+        # 텍스트 전체 추출 (태그 다 떼고 순수 글자만)
+        full_text = soup.get_text(" ", strip=True) # 공백으로 구분
+        
         회사명 = ""
         정산일자 = ""
 
-        # [1] 회사명 추출 (공급자 칸 오른쪽 확인)
+        # -------------------------------------------------
+        # [1] 회사명 추출 전략
+        # -------------------------------------------------
+        
+        # 전략 A: 표 구조 탐색 (기존 방식 보완)
+        # '상호'가 포함된 td를 찾고, 그 형제들 중 '성명'이 아닌 텍스트 찾기
         target_cells = soup.find_all(lambda tag: tag.name in ['td', 'th'] and ('상호' in tag.get_text() or '법인명' in tag.get_text()))
         for cell in target_cells:
+            # 상호 칸의 바로 다음 칸들 확인
             siblings = cell.find_next_siblings(['td', 'th'])
             for sibling in siblings:
                 val = sibling.get_text(strip=True)
-                if not val: continue
-                if any(k in val for k in ["성명", "대표자", "등록번호", "사업자"]): break
+                if not val: continue # 빈칸 패스
                 
-                회사명 = val.replace("(", "").replace(")", "").replace("법인명", "").strip()
-                break
+                # 라벨이 아니면 회사명으로 간주
+                if not any(k in val for k in ["성명", "대표자", "등록번호", "사업자"]):
+                    회사명 = val
+                    break
             if 회사명: break
-
-        # [2] 정산일자 추출 (작성일자 아래 칸 & YYYY/MM/DD 포맷)
-        # 작성일자라고 적힌 셀을 찾습니다.
-        date_label_cells = soup.find_all(lambda tag: tag.name in ['td', 'th'] and ('작성' in tag.get_text() and '일자' in tag.get_text()))
         
-        for cell in date_label_cells:
-            # 현재 셀이 속한 행(tr)을 찾습니다.
-            current_row = cell.find_parent('tr')
-            if current_row:
-                # 바로 다음 행(Next Row)을 찾습니다.
-                next_row = current_row.find_next_sibling('tr')
-                if next_row:
-                    # 다음 행의 텍스트 전체에서 날짜 패턴(YYYY/MM/DD)을 찾습니다.
-                    row_text = next_row.get_text()
-                    # 슬래시(/) 구분자 패턴 적용
-                    match = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", row_text)
+        # 전략 B: 텍스트 패턴 매칭 (백업)
+        # 표 구조가 꼬여서 못 찾았을 때, "상호" ... "성명" 사이의 글자를 정규식으로 찾습니다.
+        if not 회사명:
+            # 패턴: 상호(또는 법인명) [공백/특수문자] [우리가 원하는 회사명] [공백] 성명(또는 대표자)
+            # 예: "상호(법인명) (주)부스터스 성명(대표자)" -> "(주)부스터스" 추출
+            pattern = r"(?:상호|법인명)[\s\(\):]*(.*?)[\s\(\):]*(?:성명|대표자)"
+            match = re.search(pattern, full_text)
+            if match:
+                candidate = match.group(1).strip()
+                # 너무 길면 오인식일 수 있으므로 길이 제한
+                if len(candidate) < 30:
+                    회사명 = candidate
+
+        # 최종 정제
+        if 회사명:
+            회사명 = 회사명.replace("(", "").replace(")", "").replace("법인명", "").strip()
+
+
+        # -------------------------------------------------
+        # [2] 정산일자 추출 전략 (YYYY/MM/DD)
+        # -------------------------------------------------
+        
+        # 전략 A: '작성일자' 라벨이 있는 행(TR)의 '다음 행(TR)'을 찾아서 검색 (사용자 요청)
+        date_labels = soup.find_all(lambda tag: tag.name in ['td', 'th'] and ('작성' in tag.get_text() and '일자' in tag.get_text()))
+        for label in date_labels:
+            parent_tr = label.find_parent('tr')
+            if parent_tr:
+                next_tr = parent_tr.find_next_sibling('tr')
+                if next_tr:
+                    next_tr_text = next_tr.get_text()
+                    # YYYY/MM/DD 패턴 검색
+                    match = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", next_tr_text)
                     if match:
                         y, m, d = match.groups()
                         정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
                         break
         
-        # 만약 표 구조로 못 찾았다면, 전체 텍스트에서 YYYY/MM/DD 패턴 백업 검색
+        # 전략 B: 전체 텍스트에서 YYYY/MM/DD 검색 (백업)
+        # 문서 어딘가에 YYYY/MM/DD가 있다면 99% 확률로 작성일자입니다.
         if not 정산일자:
-            text_content = soup.get_text()
-            match = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", text_content)
+            match = re.search(r"(\d{4})/(\d{1,2})/(\d{1,2})", full_text)
             if match:
                 y, m, d = match.groups()
                 정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
@@ -150,7 +177,7 @@ def get_driver():
     return driver
 
 # =====================================================
-# 4. 앱 실행 로직 (다운로드 상태 유지 기능 추가)
+# 4. 앱 실행 로직 (다운로드 유지 기능 포함)
 # =====================================================
 st.set_page_config(page_title="Boosters Tax Converter", page_icon="📄")
 user_email = require_login()
@@ -162,16 +189,15 @@ if st.sidebar.button("로그아웃"):
 
 st.title("📄 세금계산서 PDF 변환기 (Boosters)")
 
-# [중요] 변환된 파일 정보를 저장할 세션 초기화
+# 세션 상태 초기화 (변환된 파일 목록 저장소)
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
 
 uploaded_files = st.file_uploader("HTML 파일 선택 (다중 선택 가능)", type="html", accept_multiple_files=True)
 biz_num = st.text_input("비밀번호 (사업자번호)", value="1828801269")
 
-# 변환 버튼 클릭 시 로직
 if st.button("🚀 변환 시작") and uploaded_files:
-    # 기존 결과 초기화 (새로 변환하니까)
+    # 기존 목록 비우기
     st.session_state.processed_files = []
     
     driver = get_driver()
@@ -180,7 +206,7 @@ if st.button("🚀 변환 시작") and uploaded_files:
     for idx, f in enumerate(uploaded_files):
         with st.status(f"처리 중 ({idx+1}/{len(uploaded_files)}): {f.name}") as status:
             try:
-                # HTML 읽기
+                # 1. HTML 읽기
                 raw_bytes = f.getvalue()
                 try:
                     html_content = raw_bytes.decode('utf-8')
@@ -190,10 +216,10 @@ if st.button("🚀 변환 시작") and uploaded_files:
                     except:
                         html_content = raw_bytes.decode('cp949', errors='ignore')
 
-                # 정보 추출
+                # 2. 정보 추출 (상호, 정산일자)
                 회사명, 정산일자 = extract_info_from_html_content(html_content)
                 
-                # 폰트 스타일 삽입
+                # 3. 폰트 스타일 삽입
                 font_style = """
                 <style>
                     @import url('https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700&display=swap');
@@ -208,12 +234,12 @@ if st.button("🚀 변환 시작") and uploaded_files:
                 else:
                     html_content = font_style + html_content
 
-                # 임시 파일 생성
+                # 4. 임시 파일 저장
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode='w', encoding='utf-8') as tmp:
                     tmp.write(html_content)
                     h_path = tmp.name
 
-                # Selenium 실행
+                # 5. Selenium 실행
                 driver.get(f"file://{h_path}")
                 wait = WebDriverWait(driver, 10)
                 
@@ -225,7 +251,7 @@ if st.button("🚀 변환 시작") and uploaded_files:
                 except:
                     pass 
 
-                # PDF 생성
+                # 6. PDF 생성
                 pdf_data = driver.execute_cdp_cmd("Page.printToPDF", {
                     "printBackground": True,
                     "paperWidth": 8.27,
@@ -233,12 +259,18 @@ if st.button("🚀 변환 시작") and uploaded_files:
                 })
                 pdf_bytes = base64.b64decode(pdf_data["data"])
                 
-                # 파일명 생성
-                if not 회사명: 회사명 = "상호미상"
-                safe_name = re.sub(r'[\\/*?:"<>|]', "_", 회사명)
-                fn = f"세금계산서_{safe_name}_{정산일자}.pdf" if 정산일자 else f"세금계산서_{safe_name}_{int(time.time())}.pdf"
+                # 7. 파일명 생성 로직
+                if not 회사명: 회사명 = "상호확인필요"
                 
-                # [핵심 변경] 바로 다운로드 버튼을 띄우지 않고, 세션에 저장합니다.
+                # 정산일자가 없으면 오늘 날짜 사용
+                if not 정산일자:
+                    now = time.localtime()
+                    정산일자 = f"{now.tm_year}{str(now.tm_mon).zfill(2)}{str(now.tm_mday).zfill(2)}"
+                
+                safe_name = re.sub(r'[\\/*?:"<>|]', "_", 회사명)
+                fn = f"세금계산서_{safe_name}_{정산일자}.pdf"
+                
+                # 8. 세션에 결과 저장 (다운로드 유지)
                 st.session_state.processed_files.append({
                     "file_name": fn,
                     "data": pdf_bytes,
@@ -254,17 +286,18 @@ if st.button("🚀 변환 시작") and uploaded_files:
         progress_bar.progress((idx + 1) / len(uploaded_files))
 
     driver.quit()
-    st.success("모든 변환이 완료되었습니다! 아래에서 파일을 다운로드하세요.")
+    st.success("모든 변환이 완료되었습니다! 아래 목록에서 다운로드하세요.")
 
-# [중요] 변환 루프 밖에서 다운로드 버튼 생성 (화면이 리프레시되어도 유지됨)
+# 다운로드 버튼 영역 (화면 리프레시 돼도 유지됨)
 if st.session_state.processed_files:
     st.write("---")
     st.subheader(f"📥 변환된 파일 목록 ({len(st.session_state.processed_files)}개)")
     
+    # 모두 다운로드용 ZIP 기능은 복잡하므로 개별 다운로드 제공
     for i, file_info in enumerate(st.session_state.processed_files):
         col1, col2 = st.columns([3, 1])
         with col1:
-            st.write(f"📄 {file_info['file_name']}")
+            st.write(f"**{i+1}.** {file_info['file_name']}")
         with col2:
             st.download_button(
                 label="다운로드",
@@ -274,7 +307,6 @@ if st.session_state.processed_files:
                 key=f"download_btn_{i}"
             )
             
-    # 전체 초기화 버튼
     if st.button("목록 초기화"):
         st.session_state.processed_files = []
         st.rerun()
