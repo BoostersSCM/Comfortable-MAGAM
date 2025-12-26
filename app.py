@@ -76,7 +76,7 @@ def require_login():
         st.stop()
 
 # =====================================================
-# 2. [핵심 수정] HTML 표 구조 기반 정보 추출
+# 2. [강력해진] HTML 표 구조 기반 정보 추출
 # =====================================================
 def extract_info_from_html_content(html_content):
     try:
@@ -85,42 +85,75 @@ def extract_info_from_html_content(html_content):
         회사명 = ""
         정산일자 = ""
 
-        # [논리적 추출 1] '상호' 칸 찾아서 그 오른쪽 칸(next_sibling) 읽기
-        # 세금계산서에는 보통 공급자(위/왼쪽)와 공급받는자(아래/오른쪽) 두 개의 상호란이 있습니다.
-        # HTML 구조상 먼저 나오는 것이 보통 '공급자'입니다.
-        
-        # '상호' 또는 '법인명'이라는 글자가 포함된 모든 표의 칸(td)을 찾습니다.
+        # -------------------------------------------------
+        # [1] 회사명 추출 (빈 칸 건너뛰기 로직 추가)
+        # -------------------------------------------------
+        # '상호' 글자가 포함된 모든 칸을 찾습니다. (공급자, 공급받는자)
         target_cells = soup.find_all(lambda tag: tag.name in ['td', 'th'] and ('상호' in tag.get_text() or '법인명' in tag.get_text()))
         
         for cell in target_cells:
-            # 해당 칸의 텍스트를 정리합니다.
-            cell_text = cell.get_text().strip()
+            # 이 칸이 '공급받는자' 쪽이면 무시하고 싶을 수 있으나, 
+            # 보통 문서 상단(먼저 나오는 것)이 '공급자'입니다.
             
-            # 정확히 라벨인지 확인 ('상호' 글자만 있거나 '상호(법인명)' 등)
-            if "상호" in cell_text or "법인명" in cell_text:
-                # [핵심 로직] 이 칸의 바로 다음 형제 요소(오른쪽 칸)를 찾습니다.
-                next_cell = cell.find_next_sibling(['td', 'th'])
-                if next_cell:
-                    value = next_cell.get_text().strip()
-                    # 값이 비어있지 않고, 또다시 라벨('성명' 등)이 아니라면 이것이 회사명입니다.
-                    if value and "성명" not in value and "대표자" not in value:
-                        회사명 = value
-                        break # 첫 번째 발견된 상호(공급자)를 찾으면 종료
-        
-        # [논리적 추출 2] 날짜 (작성일자) 찾기
-        # '작성' 또는 '일자'가 포함된 칸의 오른쪽 칸이나 아래 칸을 찾을 수도 있지만,
-        # 날짜는 텍스트 전체에서 정규식으로 찾는 게 더 안전한 경우가 많습니다 (표 구조가 다양함)
-        text_content = soup.get_text()
-        date_pattern = r"(\d{4})[년\s\.-]*(\d{1,2})[월\s\.-]*(\d{1,2})[일\s\.-]*"
-        matches = re.findall(date_pattern, text_content)
-        if matches:
-            # 가장 먼저 나오는 날짜가 보통 작성일자입니다.
-            y, m, d = matches[0]
-            정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
+            # 현재 칸의 오른쪽 형제들을 모두 가져옵니다.
+            siblings = cell.find_next_siblings(['td', 'th'])
+            
+            for sibling in siblings:
+                val = sibling.get_text(strip=True) # 공백 제거 후 텍스트 확인
+                
+                # 1. 내용이 없으면(빈 칸) -> 계속 오른쪽으로 이동 (continue)
+                if not val:
+                    continue
+                
+                # 2. 내용이 있는데 '성명', '대표자', '등록번호' 같은 라벨이다? -> 찾기 실패 (break)
+                if any(keyword in val for keyword in ["성명", "대표자", "등록번호", "사업자"]):
+                    break
+                
+                # 3. 그 외의 내용이 있다면 -> 이것이 회사명입니다!
+                # 괄호나 특수문자가 섞여 있을 수 있으니 정제합니다.
+                회사명 = val.replace("(", "").replace(")", "").replace("법인명", "").strip()
+                break # 형제 찾기 루프 종료
+            
+            if 회사명:
+                break # 전체 루프 종료 (첫 번째 발견된 상호 사용)
+
+        # -------------------------------------------------
+        # [2] 정산일자 추출 (작성일자 라벨 검색 + 정규식 백업)
+        # -------------------------------------------------
+        # 방법 A: '작성'과 '일자'가 들어간 칸 옆에 있는 날짜 찾기
+        date_cells = soup.find_all(lambda tag: tag.name in ['td', 'th'] and ('작성' in tag.get_text() and '일자' in tag.get_text()))
+        for cell in date_cells:
+            siblings = cell.find_next_siblings(['td', 'th'])
+            for sibling in siblings:
+                val = sibling.get_text(strip=True)
+                # 날짜 형식(숫자로 시작)이 보이면 가져옵니다.
+                if val and val[0].isdigit():
+                    # 숫자만 남기고 추출
+                    nums = re.findall(r'\d+', val)
+                    if len(nums) >= 3: # 연, 월, 일
+                        y = nums[0]
+                        m = nums[1].zfill(2)
+                        d = nums[2].zfill(2)
+                        정산일자 = f"{y}{m}{d}"
+                        break
+            if 정산일자: break
+
+        # 방법 B: 실패했다면 전체 텍스트에서 날짜 패턴 검색 (백업)
+        if not 정산일자:
+            text_content = soup.get_text()
+            # 2023-12-31, 2023.12.31, 2023년 12월 31일 등 모두 대응
+            date_pattern = r"(\d{4})[\s\.\-\년]+(\d{1,2})[\s\.\-\월]+(\d{1,2})[\s\.\-\일]*"
+            matches = re.findall(date_pattern, text_content)
+            if matches:
+                # 가장 문서 상단에 있는 날짜가 작성일자일 확률이 높음
+                y, m, d = matches[0]
+                정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
 
         return 회사명.strip(), 정산일자
 
     except Exception as e:
+        # 에러 발생 시 로그라도 남기면 좋습니다.
+        print(f"HTML Parsing Error: {e}")
         return "", ""
 
 # =====================================================
