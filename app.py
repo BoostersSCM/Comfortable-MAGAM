@@ -6,6 +6,8 @@ import base64
 import time
 import requests
 import shutil
+import zipfile  # [추가] 압축 기능을 위한 라이브러리
+import io       # [추가] 메모리 상에서 파일을 다루기 위한 라이브러리
 
 import pdfplumber
 from authlib.integrations.requests_client import OAuth2Session
@@ -17,7 +19,7 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # =====================================================
-# 1. Google OAuth (로그인 절차 간소화)
+# 1. Google OAuth
 # =====================================================
 def require_login():
     if "user_email" in st.session_state:
@@ -37,12 +39,10 @@ def require_login():
     code = st.query_params.get("code")
 
     if not code:
-        # [수정] prompt="consent" 삭제 -> 자동 로그인 기능 활성화
-        # 이 옵션을 지우면, 최초 1회만 동의하면 그 다음부터는 클릭 시 바로 로그인됩니다.
+        # prompt="consent" 삭제 -> 자동 로그인 활성화
         auth_url, _ = oauth.create_authorization_url(
             "https://accounts.google.com/o/oauth2/auth",
             access_type="offline",
-            # prompt="consent",  <-- 이 줄을 삭제함
         )
         st.title("🔐 로그인 필요")
         st.info("Google 계정으로 로그인해 주세요.")
@@ -77,55 +77,35 @@ def require_login():
         st.stop()
 
 # =====================================================
-# 2. PDF 기반 정보 추출 (정규식 고도화)
+# 2. PDF 정보 추출 (텍스트 기반)
 # =====================================================
 def extract_info_from_pdf(pdf_path):
     try:
         with pdfplumber.open(pdf_path) as pdf:
-            # 첫 페이지 전체 텍스트 추출
             text = pdf.pages[0].extract_text()
             if not text: return "", ""
             
             회사명 = ""
             정산일자 = ""
             
-            # -----------------------------------------------------------
-            # [1] 회사명 추출: '상호'와 '성명' 사이의 텍스트 캡처
-            # -----------------------------------------------------------
-            # PDF에서는 텍스트가 한 줄로 인식될 확률이 높습니다.
-            # 예: "등록번호 123-45-67890 상호(법인명) (주)부스터스 성명(대표자) 홍길동"
-            
-            # 정규식 설명: 
-            # (?:상호|법인명).*?  -> '상호' 또는 '법인명' 뒤에 오는 괄호나 공백 무시
-            # (.*?)              -> 우리가 원하는 '회사명' (최소 매칭)
-            # \s* -> 공백
-            # (?:성명|대표자)     -> 뒤에 '성명'이나 '대표자'가 나오면 정지
+            # 1. 회사명 추출 ('상호' ~ '성명' 사이)
             name_pattern = r"(?:상호|법인명)[^\s]*\s+(.*?)\s+(?:성명|대표자)"
-            
             match = re.search(name_pattern, text)
             if match:
                 회사명 = match.group(1).strip()
             
-            # 만약 정규식으로 못 찾았다면(줄바꿈 등 이슈), 줄 단위로 찾기 (백업)
+            # 백업 로직
             if not 회사명:
                 lines = text.split('\n')
                 for line in lines:
                     if "상호" in line and "성명" in line:
-                        # 단순히 문자열 자르기로 시도
-                        temp = line.split("성명")[0] # 성명 앞부분
+                        temp = line.split("성명")[0]
                         if "상호" in temp:
-                            회사명 = temp.split("상호")[-1] # 상호 뒷부분
-                            # 괄호 제거
+                            회사명 = temp.split("상호")[-1]
                             회사명 = 회사명.replace("(법인명)", "").replace("(", "").replace(")", "").strip()
                             break
 
-            # -----------------------------------------------------------
-            # [2] 날짜 추출: YYYY/MM/DD 또는 YYYY.MM.DD 패턴 검색
-            # -----------------------------------------------------------
-            # HTML 상에서는 쪼개져 있어도 PDF 텍스트는 보통 날짜가 붙어 나옵니다.
-            # 작성일자는 보통 문서 상단이나 중간에 위치하므로 전체 텍스트에서 찾습니다.
-            
-            # 2024/05/20, 2024.05.20, 2024-05-20 모두 대응
+            # 2. 날짜 추출 (YYYY.MM.DD 등)
             date_match = re.search(r"(\d{4})[\.\-/](\d{1,2})[\.\-/](\d{1,2})", text)
             if date_match:
                 y, m, d = date_match.groups()
@@ -134,7 +114,6 @@ def extract_info_from_pdf(pdf_path):
             return 회사명.strip(), 정산일자
 
     except Exception as e:
-        print(f"PDF Parsing Error: {e}")
         return "", ""
 
 # =====================================================
@@ -166,7 +145,6 @@ if st.sidebar.button("로그아웃"):
     st.rerun()
 
 st.title("📄 세금계산서 PDF 변환기 (Boosters)")
-st.caption("HTML을 PDF로 변환한 후, PDF 내부의 텍스트를 인식하여 파일명을 생성합니다.")
 
 if "processed_files" not in st.session_state:
     st.session_state.processed_files = []
@@ -182,7 +160,6 @@ if st.button("🚀 변환 시작") and uploaded_files:
     for idx, f in enumerate(uploaded_files):
         with st.status(f"처리 중 ({idx+1}/{len(uploaded_files)}): {f.name}") as status:
             try:
-                # 1. HTML 인코딩 보정
                 raw_bytes = f.getvalue()
                 try:
                     html_content = raw_bytes.decode('utf-8')
@@ -192,7 +169,6 @@ if st.button("🚀 변환 시작") and uploaded_files:
                     except:
                         html_content = raw_bytes.decode('cp949', errors='ignore')
 
-                # 2. 폰트 강제 적용 (PDF 글자 깨짐 방지 - 한글 인식 필수조건)
                 font_style = """
                 <style>
                     @import url('https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700&display=swap');
@@ -207,12 +183,10 @@ if st.button("🚀 변환 시작") and uploaded_files:
                 else:
                     html_content = font_style + html_content
 
-                # 3. 임시 HTML 파일 저장
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode='w', encoding='utf-8') as tmp:
                     tmp.write(html_content)
                     h_path = tmp.name
 
-                # 4. Selenium으로 PDF 생성
                 driver.get(f"file://{h_path}")
                 wait = WebDriverWait(driver, 10)
                 try:
@@ -229,18 +203,14 @@ if st.button("🚀 변환 시작") and uploaded_files:
                 })
                 pdf_bytes = base64.b64decode(pdf_data["data"])
                 
-                # 5. 생성된 PDF를 임시 저장 후 다시 읽어서 텍스트 추출 (여기가 핵심!)
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
                     tmp_pdf.write(pdf_bytes)
                     p_path = tmp_pdf.name
                 
-                # PDF 파일 자체를 분석
                 회사명, 정산일자 = extract_info_from_pdf(p_path)
                 
-                # 6. 파일명 생성
                 if not 회사명: 회사명 = "상호확인필요"
                 if not 정산일자: 
-                    # 날짜 못 찾으면 오늘 날짜
                     now = time.localtime()
                     정산일자 = f"{now.tm_year}{str(now.tm_mon).zfill(2)}{str(now.tm_mday).zfill(2)}"
 
@@ -262,12 +232,35 @@ if st.button("🚀 변환 시작") and uploaded_files:
         progress_bar.progress((idx + 1) / len(uploaded_files))
 
     driver.quit()
-    st.success("변환 완료! 아래에서 다운로드하세요.")
+    st.success("변환 완료!")
 
-# 다운로드 버튼 유지
+# =====================================================
+# 5. 다운로드 영역 (일괄 다운로드 추가)
+# =====================================================
 if st.session_state.processed_files:
     st.write("---")
-    st.subheader(f"📥 파일 목록 ({len(st.session_state.processed_files)}개)")
+    
+    # [추가됨] 파일이 2개 이상일 때만 ZIP 다운로드 버튼 표시
+    if len(st.session_state.processed_files) > 1:
+        st.subheader("📦 일괄 다운로드")
+        
+        # 메모리에 ZIP 파일 생성
+        zip_buffer = io.BytesIO()
+        with zipfile.ZipFile(zip_buffer, "w") as zip_file:
+            for file_info in st.session_state.processed_files:
+                # ZIP 파일 내에 PDF 추가
+                zip_file.writestr(file_info["file_name"], file_info["data"])
+        
+        st.download_button(
+            label="📦 모든 파일 압축 다운로드 (ZIP)",
+            data=zip_buffer.getvalue(),
+            file_name=f"세금계산서_모음_{int(time.time())}.zip",
+            mime="application/zip",
+            type="primary" # 버튼 색상 강조
+        )
+        st.write("---")
+
+    st.subheader(f"📥 개별 다운로드 ({len(st.session_state.processed_files)}개)")
     
     for i, file_info in enumerate(st.session_state.processed_files):
         col1, col2 = st.columns([3, 1])
