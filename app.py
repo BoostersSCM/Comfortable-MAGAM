@@ -111,13 +111,25 @@ def extract_info_from_pdf(pdf_path):
             return 회사명.strip(), 정산일자
     except: return "", ""
 
+# =====================================================
+# 3. Selenium Driver 설정 (Streamlit Cloud 호환 수정판)
+# =====================================================
 def get_driver():
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
-    service = Service(ChromeDriverManager().install())
-    return webdriver.Chrome(service=service, options=options)
+    options.add_argument("--disable-gpu")
+    
+    # 중요: Streamlit Cloud 환경에 설치된 크롬 위치 지정
+    options.binary_location = "/usr/bin/chromium"
+
+    # 중요: 버전 충돌 방지를 위해 webdriver_manager 대신 시스템 드라이버 직접 지정
+    # packages.txt에 의해 설치된 경로입니다.
+    service = Service("/usr/bin/chromedriver")
+    
+    driver = webdriver.Chrome(service=service, options=options)
+    return driver
 
 # --- 앱 실행 ---
 st.set_page_config(page_title="Boosters Tax Converter", page_icon="📄")
