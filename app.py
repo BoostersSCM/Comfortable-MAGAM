@@ -78,11 +78,9 @@ def require_login():
         st.query_params.clear()  # URL에서 code 제거
         st.rerun()  # 페이지 새로고침하여 메인 화면 진입
         
-    except Exception as e:
-        st.error(f"인증 처리 중 오류가 발생했습니다. 다시 시도해 주세요.")
-        if st.button("로그인 다시 시도"):
-            st.query_params.clear()
-            st.rerun()
+        except Exception as e:
+        # 실제 에러 내용을 화면에 출력하여 원인을 파악합니다.
+        st.error(f"상세 에러 내용: {str(e)}") 
         st.stop()
 
 # =====================================================
