@@ -45,8 +45,8 @@ def require_login():
             access_type="offline",
         )
         st.title("🔐 로그인 필요")
-        st.info("Google 계정으로 로그인해 주세요.")
-        st.link_button("Google 계정으로 로그인", auth_url)
+        st.info("Boosters 계정으로 로그인해 주세요.")
+        st.link_button("Boosters 계정으로 로그인", auth_url)
         st.stop()
 
     try:
