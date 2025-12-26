@@ -20,24 +20,27 @@ from selenium.webdriver.support import expected_conditions as EC
 # 1. Google OAuth (Python 3.13 호환성 수정판)
 # =====================================================
 def require_login():
-    # 세션 상태에 사용자 이메일이 있으면 즉시 반환
     if "user_email" in st.session_state:
         return st.session_state["user_email"]
 
-    # OAuth 세션 설정
-    # 주의: st.secrets["google"] 형식이 맞는지 확인하세요.
-    oauth = OAuth2Session(
-        client_id=st.secrets["google"]["client_id"],
-        client_secret=st.secrets["google["client_secret"],
-        scope="openid email profile",
-        redirect_uri=st.secrets["google"]["redirect_uri"],
-    )
+    # 1. Secrets 섹션 이름 확인 (사용자가 설정한 이름에 맞춰 수정하세요)
+    # 만약 Secrets에 [google_auth]라고 적었다면 "google"을 "google_auth"로 바꿔야 합니다.
+    secret_key = "google" # 또는 "google_auth"
+    
+    try:
+        oauth = OAuth2Session(
+            client_id=st.secrets[secret_key]["client_id"],
+            client_secret=st.secrets[secret_key]["client_secret"],
+            scope="openid email profile",
+            redirect_uri=st.secrets[secret_key]["redirect_uri"],
+        )
+    except KeyError as e:
+        st.error(f"❌ Secrets 설정 오류: {secret_key} 섹션에 {e} 키가 없습니다.")
+        st.stop()
 
-    # URL 파라미터에서 인증 코드 추출
     query_params = st.query_params
     code = query_params.get("code")
 
-    # 코드가 없으면 로그인 버튼 표시
     if not code:
         auth_url, _ = oauth.create_authorization_url(
             "https://accounts.google.com/o/oauth2/auth",
@@ -48,16 +51,15 @@ def require_login():
         st.link_button("Google 계정으로 로그인", auth_url)
         st.stop()
 
-    # 토큰 교환 및 사용자 정보 획득
     try:
-        # redirect_uri_mismatch 해결: fetch_token에 code와 redirect_uri를 명시적으로 전달
+        # 토큰 획득 시도
         token = oauth.fetch_token(
             "https://oauth2.googleapis.com/token",
             code=code,
-            client_secret=st.secrets["google"]["client_secret"]
+            client_secret=st.secrets[secret_key]["client_secret"]
         )
 
-        # TypeError 해결: authlib 세션 대신 requests로 직접 사용자 정보 요청
+        # 사용자 정보 획득 시도
         userinfo_endpoint = "https://openidconnect.googleapis.com/v1/userinfo"
         headers = {'Authorization': f"Bearer {token['access_token']}"}
         userinfo_resp = requests.get(userinfo_endpoint, headers=headers)
@@ -65,20 +67,19 @@ def require_login():
 
         email = userinfo.get("email", "").lower()
 
-        # 도메인 제한 체크
         if not email.endswith("@boosters.kr"):
             st.error(f"🚫 접근 권한이 없습니다: {email}")
             st.stop()
 
-        # 인증 성공 시 세션 저장 및 URL 정리
         st.session_state["user_email"] = email
         st.query_params.clear() 
         st.rerun()
-        return email
-
+        
     except Exception as e:
-        st.error(f"인증 오류 발생: {str(e)}")
-        if st.button("다시 로그인 시도"):
+        # ⚠️ 이 부분이 핵심입니다. 어떤 에러인지 상세히 출력합니다.
+        st.error("❗ 인증 과정에서 상세 에러가 발생했습니다.")
+        st.exception(e) # 전체 에러 트레이스백 출력
+        if st.button("로그인 다시 시도"):
             st.query_params.clear()
             st.rerun()
         st.stop()
