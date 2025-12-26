@@ -6,8 +6,8 @@ import base64
 import time
 import requests
 import shutil
+from bs4 import BeautifulSoup  # HTML 구조 분석을 위한 핵심 라이브러리
 
-import pdfplumber
 from authlib.integrations.requests_client import OAuth2Session
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -23,11 +23,15 @@ def require_login():
     if "user_email" in st.session_state:
         return st.session_state["user_email"]
 
+    client_id = st.secrets["google"]["client_id"]
+    client_secret = st.secrets["google"]["client_secret"]
+    redirect_uri = st.secrets["google"]["redirect_uri"]
+
     oauth = OAuth2Session(
-        client_id=st.secrets["google"]["client_id"],
-        client_secret=st.secrets["google"]["client_secret"],
+        client_id=client_id,
+        client_secret=client_secret,
         scope="openid email profile",
-        redirect_uri=st.secrets["google"]["redirect_uri"],
+        redirect_uri=redirect_uri,
     )
 
     code = st.query_params.get("code")
@@ -47,7 +51,7 @@ def require_login():
         token = oauth.fetch_token(
             "https://oauth2.googleapis.com/token",
             code=code,
-            authorization_response=st.secrets["google"]["redirect_uri"] + "?code=" + code
+            authorization_response=redirect_uri + "?code=" + code
         )
 
         userinfo_endpoint = "https://openidconnect.googleapis.com/v1/userinfo"
@@ -71,71 +75,56 @@ def require_login():
             st.rerun()
         st.stop()
 
-        return "", ""
 # =====================================================
-# 2. PDF 정보 추출 (확실한 문자열 자르기)
+# 2. [핵심 수정] HTML 표 구조 기반 정보 추출
 # =====================================================
-def extract_info_from_pdf(pdf_path):
+def extract_info_from_html_content(html_content):
     try:
-        with pdfplumber.open(pdf_path) as pdf:
-            text = pdf.pages[0].extract_text()
-            if not text: return "", ""
-            
-            lines = text.split("\n")
-            회사명 = ""
-            정산일자 = ""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        
+        회사명 = ""
+        정산일자 = ""
 
-            # [1] 회사명 추출 (강제 슬라이싱)
-            for line in lines:
-                # 이 줄에 '상호'와 '성명'이 동시에 있다면, 그 사이가 회사 이름입니다.
-                if "상호" in line and "성명" in line:
-                    # 1. '성명' 글자를 기준으로 앞부분만 가져옵니다.
-                    temp = line.split("성명")[0]
-                    
-                    # 2. '상호' 또는 '법인명' 뒤에 있는 괄호나 특수문자 제거
-                    # 보통 '상호(법인명)' 이라고 되어 있으므로 ')' 기준으로 자르면 가장 확실합니다.
-                    if ")" in temp:
-                        회사명 = temp.split(")")[-1]
-                    else:
-                        # 괄호가 없다면 '상호' 기준으로 자릅니다.
-                        회사명 = temp.split("상호")[-1]
-                    
-                    # 3. 혹시 남은 '법인명' 글자 제거 및 공백 제거
-                    회사명 = 회사명.replace("법인명", "").replace("(", "").strip()
-                    break # 찾았으면 중단
+        # [논리적 추출 1] '상호' 칸 찾아서 그 오른쪽 칸(next_sibling) 읽기
+        # 세금계산서에는 보통 공급자(위/왼쪽)와 공급받는자(아래/오른쪽) 두 개의 상호란이 있습니다.
+        # HTML 구조상 먼저 나오는 것이 보통 '공급자'입니다.
+        
+        # '상호' 또는 '법인명'이라는 글자가 포함된 모든 표의 칸(td)을 찾습니다.
+        target_cells = soup.find_all(lambda tag: tag.name in ['td', 'th'] and ('상호' in tag.get_text() or '법인명' in tag.get_text()))
+        
+        for cell in target_cells:
+            # 해당 칸의 텍스트를 정리합니다.
+            cell_text = cell.get_text().strip()
             
-            # 만약 위 방법으로 못 찾았다면, 단순히 '상호' 글자가 있는 줄에서 찾기 시도
-            if not 회사명:
-                for line in lines:
-                    if "상호" in line:
-                        parts = line.split()
-                        # 보통 [등록번호] [상호] [이름] ... 순서이므로
-                        # '상호'라는 글자가 포함된 단어의 '다음 단어'를 선택
-                        for i, part in enumerate(parts):
-                            if "상호" in part and i + 1 < len(parts):
-                                candidate = parts[i+1]
-                                # 다음 단어가 '성명'이면 그건 라벨이므로 무시
-                                if "성명" not in candidate:
-                                    회사명 = candidate
-                                    break
-                        if 회사명: break
+            # 정확히 라벨인지 확인 ('상호' 글자만 있거나 '상호(법인명)' 등)
+            if "상호" in cell_text or "법인명" in cell_text:
+                # [핵심 로직] 이 칸의 바로 다음 형제 요소(오른쪽 칸)를 찾습니다.
+                next_cell = cell.find_next_sibling(['td', 'th'])
+                if next_cell:
+                    value = next_cell.get_text().strip()
+                    # 값이 비어있지 않고, 또다시 라벨('성명' 등)이 아니라면 이것이 회사명입니다.
+                    if value and "성명" not in value and "대표자" not in value:
+                        회사명 = value
+                        break # 첫 번째 발견된 상호(공급자)를 찾으면 종료
+        
+        # [논리적 추출 2] 날짜 (작성일자) 찾기
+        # '작성' 또는 '일자'가 포함된 칸의 오른쪽 칸이나 아래 칸을 찾을 수도 있지만,
+        # 날짜는 텍스트 전체에서 정규식으로 찾는 게 더 안전한 경우가 많습니다 (표 구조가 다양함)
+        text_content = soup.get_text()
+        date_pattern = r"(\d{4})[년\s\.-]*(\d{1,2})[월\s\.-]*(\d{1,2})[일\s\.-]*"
+        matches = re.findall(date_pattern, text_content)
+        if matches:
+            # 가장 먼저 나오는 날짜가 보통 작성일자입니다.
+            y, m, d = matches[0]
+            정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
 
-            # [2] 날짜 추출 (기존 유지)
-            date_pattern = r"(\d{4})[년\s\.-]*(\d{1,2})[월\s\.-]*(\d{1,2})[일\s\.-]*"
-            matches = re.findall(date_pattern, text)
-            if matches:
-                y, m, d = matches[0]
-                정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
-            
-            # [디버깅용] 만약 여전히 이상하면 화면에 텍스트를 뿌려서 확인해야 합니다.
-            # st.write(f"추출된 텍스트 라인: {회사명}") 
-            
-            return 회사명.strip(), 정산일자
-            
+        return 회사명.strip(), 정산일자
+
     except Exception as e:
         return "", ""
+
 # =====================================================
-# 3. Selenium 설정 (서버 내장 크롬 사용)
+# 3. Selenium 설정 (기존 유지)
 # =====================================================
 def get_driver():
     options = Options()
@@ -143,9 +132,8 @@ def get_driver():
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
-    options.add_argument("--lang=ko_KR") # 한글 로케일 강제 설정
+    options.add_argument("--lang=ko_KR") 
 
-    # fonts-nanum이 설치되어 있어야 한글이 나옵니다.
     options.binary_location = "/usr/bin/chromium"
     service = Service("/usr/bin/chromedriver")
     
@@ -164,6 +152,8 @@ if st.sidebar.button("로그아웃"):
     st.rerun()
 
 st.title("📄 세금계산서 PDF 변환기 (Boosters)")
+st.info("💡 팁: HTML 파일을 업로드하면 '공급자'의 상호명을 자동으로 인식하여 파일명을 변경합니다.")
+
 uploaded_files = st.file_uploader("HTML 파일 선택", type="html", accept_multiple_files=True)
 biz_num = st.text_input("비밀번호 (사업자번호)", value="1828801269")
 
@@ -173,10 +163,8 @@ if st.button("🚀 변환 시작") and uploaded_files:
     for idx, f in enumerate(uploaded_files):
         with st.status(f"처리 중: {f.name}") as status:
             try:
-                # [수정] HTML 인코딩 보정 로직
+                # 1. HTML 원본 읽기 및 인코딩 보정
                 raw_bytes = f.getvalue()
-                
-                # 1. 인코딩 감지 및 디코딩 시도 (EUC-KR 대응)
                 try:
                     html_content = raw_bytes.decode('utf-8')
                 except UnicodeDecodeError:
@@ -185,57 +173,61 @@ if st.button("🚀 변환 시작") and uploaded_files:
                     except:
                         html_content = raw_bytes.decode('cp949', errors='ignore')
 
-                # 2. 메타 태그 강제 삽입 (깨짐 방지 핵심)
-                if '<meta charset="utf-8">' not in html_content.lower():
-                    html_content = '<meta charset="utf-8">\n' + html_content
+                # 2. [변경] PDF 변환 전에 HTML에서 정보(상호, 날짜)를 먼저 추출합니다.
+                # PDF 텍스트보다 HTML 태그 구조가 훨씬 정확합니다.
+                회사명, 정산일자 = extract_info_from_html_content(html_content)
+                
+                # 3. 폰트 강제 적용 스타일 삽입 (PDF 깨짐 방지용)
+                font_style = """
+                <style>
+                    @import url('https://fonts.googleapis.com/css2?family=Nanum+Gothic:wght@400;700&display=swap');
+                    body, table, td, span, div, p, input { 
+                        font-family: 'NanumGothic', 'Nanum Gothic', 'Malgun Gothic', sans-serif !important; 
+                    }
+                </style>
+                <meta charset="utf-8">
+                """
+                
+                if "<head>" in html_content.lower():
+                    html_content_for_pdf = html_content.replace("<head>", "<head>" + font_style, 1)
+                else:
+                    html_content_for_pdf = font_style + html_content
 
-                # 3. UTF-8로 다시 저장
+                # 4. Selenium용 임시 파일 저장
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".html", mode='w', encoding='utf-8') as tmp:
-                    tmp.write(html_content)
+                    tmp.write(html_content_for_pdf)
                     h_path = tmp.name
 
-                # Selenium 실행
+                # 5. Selenium 실행
                 driver.get(f"file://{h_path}")
                 wait = WebDriverWait(driver, 10)
                 
-                # 비밀번호 입력
                 try:
                     pw = wait.until(EC.presence_of_element_located((By.XPATH, '//input[@type="password"]')))
                     pw.send_keys(biz_num)
                     driver.find_element(By.XPATH, '//button[contains(text(),"확인")]').click()
-                    time.sleep(5) # 렌더링 대기
+                    time.sleep(5) 
                 except:
-                    pass # 비밀번호 없는 경우 통과
+                    pass 
 
-                # PDF 생성
+                # 6. PDF 생성
                 pdf_data = driver.execute_cdp_cmd("Page.printToPDF", {
                     "printBackground": True,
-                    "paperWidth": 8.27, # A4
+                    "paperWidth": 8.27,
                     "paperHeight": 11.69
                 })
                 pdf_bytes = base64.b64decode(pdf_data["data"])
-
-                # 임시 PDF 저장 및 정보 추출
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".pdf") as tmp_pdf:
-                    tmp_pdf.write(pdf_bytes)
-                    p_path = tmp_pdf.name
                 
-                회사명, 정산일자 = extract_info_from_pdf(p_path)
-                
-                # 폰트 문제로 추출 실패 시 대비
-                if not 회사명:
-                    회사명 = "확인필요"
-                
+                # 7. 파일명 생성 (HTML에서 추출한 정확한 정보 사용)
+                if not 회사명: 회사명 = "상호미상"
                 safe_name = re.sub(r'[\\/*?:"<>|]', "_", 회사명)
                 fn = f"세금계산서_{safe_name}_{정산일자}.pdf" if 정산일자 else f"세금계산서_{safe_name}_{int(time.time())}.pdf"
                 
-                # 다운로드 버튼
+                # 8. 다운로드 버튼
                 st.download_button(label=f"📥 {fn}", data=pdf_bytes, file_name=fn, mime="application/pdf", key=f"d_{idx}")
-                status.update(label="✅ 완료", state="complete")
+                status.update(label=f"✅ 완료: {fn}", state="complete")
                 
-                # 파일 정리
                 os.unlink(h_path)
-                os.unlink(p_path)
                 
             except Exception as e:
                 st.error(f"오류: {str(e)}")
