@@ -72,7 +72,63 @@ def require_login():
         st.stop()
 
         return "", ""
+# =====================================================
+# 2. PDF 정보 추출 (로직 개선판)
+# =====================================================
+def extract_info_from_pdf(pdf_path):
+    try:
+        with pdfplumber.open(pdf_path) as pdf:
+            text = pdf.pages[0].extract_text()
+            if not text: return "", ""
+            
+            # [1] 회사명 추출 로직 개선
+            # 전략: "상호(법인명)" 라벨과 "성명(대표자)" 라벨 사이에 있는 텍스트를 잡습니다.
+            회사명 = ""
+            
+            # 패턴 설명: 
+            # (?:상호|법인명).*? : '상호' 또는 '법인명' 뒤에 괄호나 특수문자가 있어도 통과
+            # \s+ : 공백 건너뜀
+            # ([^\n]+?) : 우리가 원하는 '실제 상호명' (줄바꿈 전까지 추출)
+            # \s+(?:성명|대표자) : '성명' 또는 '대표자' 글자가 나오면 멈춤
+            name_pattern = r"(?:상호|법인명)[^\s]*\s+([^\n]+?)\s+(?:성명|대표자)"
+            
+            match = re.search(name_pattern, text)
+            
+            if match:
+                회사명 = match.group(1).strip()
+            else:
+                # 정규식 실패 시 백업 로직 (줄 단위 파싱)
+                lines = text.split("\n")
+                for line in lines:
+                    if "상호" in line or "법인명" in line:
+                        # 1. '성명'이나 '대표자' 뒷부분은 잘라냅니다.
+                        temp_line = line
+                        if "성명" in temp_line: temp_line = temp_line.split("성명")[0]
+                        if "대표자" in temp_line: temp_line = temp_line.split("대표자")[0]
+                        
+                        # 2. '상호'나 '법인명' 앞부분과 자기 자신을 잘라냅니다.
+                        if "상호" in temp_line:
+                            회사명 = temp_line.split("상호")[-1]
+                        elif "법인명" in temp_line:
+                            회사명 = temp_line.split("법인명")[-1]
+                            
+                        # 3. 괄호 등 잔여물 정리
+                        회사명 = 회사명.replace("(법인명)", "").strip()
+                        if 회사명: break
 
+            # [2] 날짜 추출 (기존 유지)
+            정산일자 = ""
+            date_pattern = r"(\d{4})[년\s\.-]*(\d{1,2})[월\s\.-]*(\d{1,2})[일\s\.-]*"
+            matches = re.findall(date_pattern, text)
+            if matches:
+                y, m, d = matches[0]
+                정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
+            
+            return 회사명.strip(), 정산일자
+            
+    except Exception as e:
+        print(f"Extraction Error: {e}")
+        return "", ""
 # =====================================================
 # 3. Selenium 설정 (서버 내장 크롬 사용)
 # =====================================================
