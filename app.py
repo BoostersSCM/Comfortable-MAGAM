@@ -11,7 +11,6 @@ from authlib.integrations.requests_client import OAuth2Session
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
@@ -114,18 +113,19 @@ def extract_info_from_pdf(pdf_path):
 # =====================================================
 # 3. Selenium Driver 설정 (Streamlit Cloud 호환 수정판)
 # =====================================================
+# [수정된 get_driver 함수]
+# webdriver_manager를 쓰지 않고, 서버에 설치된 크롬을 직접 사용합니다.
 def get_driver():
     options = Options()
-    options.add_argument("--headless")
+    options.add_argument("--headless")  # 화면 없이 실행
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
     
-    # 중요: Streamlit Cloud 환경에 설치된 크롬 위치 지정
+    # 중요: Streamlit Cloud 서버에 설치된 크롬 브라우저 위치
     options.binary_location = "/usr/bin/chromium"
 
-    # 중요: 버전 충돌 방지를 위해 webdriver_manager 대신 시스템 드라이버 직접 지정
-    # packages.txt에 의해 설치된 경로입니다.
+    # 중요: webdriver_manager 대신 시스템에 설치된 드라이버 경로 직접 지정
     service = Service("/usr/bin/chromedriver")
     
     driver = webdriver.Chrome(service=service, options=options)
