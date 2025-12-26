@@ -2,4 +2,3 @@ streamlit
 authlib
 selenium
 pdfplumber
-beautifulsoup4
