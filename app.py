@@ -17,71 +17,81 @@ from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
 # =====================================================
-# 1. Google OAuth (Python 3.13 호환성 수정판)
+# 1. Google OAuth (호환성 및 디버깅 최적화)
 # =====================================================
 def require_login():
+    # 1. 세션에 이메일이 있으면 즉시 반환
     if "user_email" in st.session_state:
         return st.session_state["user_email"]
 
-    # 1. Secrets 섹션 이름 확인 (사용자가 설정한 이름에 맞춰 수정하세요)
-    # 만약 Secrets에 [google_auth]라고 적었다면 "google"을 "google_auth"로 바꿔야 합니다.
-    secret_key = "google" # 또는 "google_auth"
-    
-    try:
-        oauth = OAuth2Session(
-            client_id=st.secrets[secret_key]["client_id"],
-            client_secret=st.secrets[secret_key]["client_secret"],
-            scope="openid email profile",
-            redirect_uri=st.secrets[secret_key]["redirect_uri"],
-        )
-    except KeyError as e:
-        st.error(f"❌ Secrets 설정 오류: {secret_key} 섹션에 {e} 키가 없습니다.")
-        st.stop()
-
+    # 2. 인증 코드(code) 확인
     query_params = st.query_params
     code = query_params.get("code")
 
+    # 3. 코드가 없으면 로그인 버튼 생성
     if not code:
-        auth_url, _ = oauth.create_authorization_url(
-            "https://accounts.google.com/o/oauth2/auth",
-            access_type="offline",
-            prompt="consent",
+        # 로그인 URL 직접 생성 (라이브러리 충돌 방지)
+        client_id = st.secrets["google"]["client_id"]
+        redirect_uri = st.secrets["google"]["redirect_uri"]
+        scope = "openid email profile"
+        auth_url = (
+            f"https://accounts.google.com/o/oauth2/auth?"
+            f"client_id={client_id}&redirect_uri={redirect_uri}&"
+            f"scope={scope}&response_type=code&access_type=offline&prompt=consent"
         )
+        
         st.title("🔐 로그인 필요")
+        st.info("@boosters.kr 계정으로 로그인해 주세요.")
         st.link_button("Google 계정으로 로그인", auth_url)
         st.stop()
 
+    # 4. 토큰 교환 및 정보 획득 (requests 직접 사용)
     try:
-        # 토큰 획득 시도
-        token = oauth.fetch_token(
-            "https://oauth2.googleapis.com/token",
-            code=code,
-            client_secret=st.secrets[secret_key]["client_secret"]
-        )
+        # (1) 토큰 교환 요청
+        token_url = "https://oauth2.googleapis.com/token"
+        token_data = {
+            "code": code,
+            "client_id": st.secrets["google"]["client_id"],
+            "client_secret": st.secrets["google"]["client_secret"],
+            "redirect_uri": st.secrets["google"]["redirect_uri"],
+            "grant_type": "authorization_code",
+        }
+        
+        token_resp = requests.post(token_url, data=token_data)
+        token_json = token_resp.json()
+        
+        # 토큰 획득 실패 시 에러 출력
+        if "access_token" not in token_json:
+            st.error("❗ Google로부터 토큰을 받아오지 못했습니다.")
+            st.json(token_json) # 구글이 보내온 실제 에러 메시지(예: redirect_uri_mismatch) 출력
+            st.stop()
+            
+        access_token = token_json["access_token"]
 
-        # 사용자 정보 획득 시도
-        userinfo_endpoint = "https://openidconnect.googleapis.com/v1/userinfo"
-        headers = {'Authorization': f"Bearer {token['access_token']}"}
-        userinfo_resp = requests.get(userinfo_endpoint, headers=headers)
-        userinfo = userinfo_resp.json()
-
+        # (2) 사용자 정보 요청
+        userinfo_url = "https://openidconnect.googleapis.com/v1/userinfo"
+        headers = {"Authorization": f"Bearer {access_token}"}
+        user_resp = requests.get(userinfo_url, headers=headers)
+        userinfo = user_resp.json()
+        
         email = userinfo.get("email", "").lower()
 
+        # 도메인 체크
         if not email.endswith("@boosters.kr"):
             st.error(f"🚫 접근 권한이 없습니다: {email}")
+            if st.button("다시 로그인"):
+                st.query_params.clear()
+                st.rerun()
             st.stop()
 
+        # 성공 시 세션 저장 및 정리
         st.session_state["user_email"] = email
-        st.query_params.clear() 
+        st.query_params.clear()
         st.rerun()
-        
+
     except Exception as e:
-        # ⚠️ 이 부분이 핵심입니다. 어떤 에러인지 상세히 출력합니다.
-        st.error("❗ 인증 과정에서 상세 에러가 발생했습니다.")
-        st.exception(e) # 전체 에러 트레이스백 출력
-        if st.button("로그인 다시 시도"):
-            st.query_params.clear()
-            st.rerun()
+        st.error("❗ 시스템 처리 중 예상치 못한 오류가 발생했습니다.")
+        st.exception(e) # 에러 상세 내용(Traceback) 출력
         st.stop()
 
 # =====================================================
@@ -124,17 +134,14 @@ def get_driver():
     return webdriver.Chrome(service=service, options=options)
 
 # =====================================================
-# 4. 앱 실행 및 UI
+# 앱 실행 (최상단 호출)
 # =====================================================
 st.set_page_config(page_title="Boosters Tax Converter", page_icon="📄")
 
-# 로그인 강제
+# 로그인이 완료될 때까지 이 아래 코드는 실행되지 않음
 user_email = require_login()
 
 st.sidebar.success(f"✅ 로그인됨\n{user_email}")
-if st.sidebar.button("로그아웃"):
-    st.session_state.clear()
-    st.rerun()
 
 st.title("📄 세금계산서 PDF 변환기 (Boosters)")
 uploaded_files = st.file_uploader("HTML 파일 선택", type="html", accept_multiple_files=True)
