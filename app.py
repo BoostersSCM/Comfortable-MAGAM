@@ -71,42 +71,7 @@ def require_login():
             st.rerun()
         st.stop()
 
-# =====================================================
-# 2. PDF 정보 추출 (텍스트 깨짐 해결 시 정상 작동)
-# =====================================================
-def extract_info_from_pdf(pdf_path):
-    try:
-        with pdfplumber.open(pdf_path) as pdf:
-            # 첫 페이지에서 텍스트 추출
-            text = pdf.pages[0].extract_text()
-            if not text: return "", ""
-            
-            lines = text.split("\n")
-            회사명 = ""
-            
-            # 회사명 추출 로직
-            for line in lines:
-                if "상호" in line or "법인명" in line:
-                    parts = line.split()
-                    for i, p in enumerate(parts):
-                        if ("상호" in p or "법인명" in p) and i + 1 < len(parts):
-                            res_parts = parts[i + 1 :]
-                            for idx, word in enumerate(res_parts):
-                                if "성명" in word: res_parts = res_parts[:idx]; break
-                            회사명 = " ".join(res_parts)
-                            break
-                    break
-            
-            # 날짜 추출 로직
-            정산일자 = ""
-            date_pattern = r"(\d{4})[년\s\.-]*(\d{1,2})[월\s\.-]*(\d{1,2})[일\s\.-]*"
-            matches = re.findall(date_pattern, text)
-            if matches:
-                y, m, d = matches[0]
-                정산일자 = f"{y}{m.zfill(2)}{d.zfill(2)}"
-            
-            return 회사명.strip(), 정산일자
-    except: return "", ""
+        return "", ""
 
 # =====================================================
 # 3. Selenium 설정 (서버 내장 크롬 사용)
